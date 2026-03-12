@@ -89,10 +89,8 @@ export default function Articles() {
                     查看插件 <Link2 className="w-4 h-4 ml-1" />
                   </a>
                 )}
-                {/* @ts-expect-error - allow optional github link in data */}
                 {project.github && (
-                  <a 
-                    // @ts-expect-error - allow optional github link in data
+                  <a
                     href={project.github} 
                     target="_blank"
                     rel="noreferrer"
