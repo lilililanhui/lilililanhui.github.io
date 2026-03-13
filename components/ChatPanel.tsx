@@ -1,13 +1,20 @@
 "use client";
 
-import { useState, useRef, useEffect } from "react";
-import { X, Send, Bot, User } from "lucide-react";
-import { sendMessage } from "@/services/chatService";
+import { useState, useRef, useEffect, useCallback } from "react";
+import { X, Send, Bot, User, AlertCircle } from "lucide-react";
+import { 
+  sendMessageStream, 
+  getRateLimitInfo, 
+  ChatMessage, 
+  RateLimitInfo, 
+  ChatError 
+} from "@/services/chatService";
 
 interface Message {
   id: string;
   role: "user" | "assistant";
   content: string;
+  isStreaming?: boolean;
 }
 
 interface ChatPanelProps {
@@ -20,28 +27,95 @@ export default function ChatPanel({ isOpen, onClose }: ChatPanelProps) {
     {
       id: "welcome",
       role: "assistant",
-      content: "你好！👋 我是 lilililanhui 的 AI 小秘书。你可以问我关于她的技术背景、项目经历或任何你想了解的内容！",
+      content: "你好！👋 我是 lilililanhui 的 AI 助手，很高兴见到你！你可以问我关于 lilililanhui 的技术背景、项目经历或任何你想了解的内容！",
     },
   ]);
   const [input, setInput] = useState("");
   const [isLoading, setIsLoading] = useState(false);
+  const [rateLimitInfo, setRateLimitInfo] = useState<RateLimitInfo | null>(null);
+  const [error, setError] = useState<string | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  const streamingMessageIdRef = useRef<string | null>(null);
 
   // 自动滚动到底部
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
-  // 打开面板时聚焦输入框
+  // 打开面板时聚焦输入框并获取配额信息
   useEffect(() => {
     if (isOpen) {
       setTimeout(() => inputRef.current?.focus(), 300);
+      // 获取配额信息
+      getRateLimitInfo()
+        .then(setRateLimitInfo)
+        .catch(() => {
+          // 忽略错误，使用默认值
+        });
     }
   }, [isOpen]);
 
+  // 处理流式输出的 chunk
+  const handleChunk = useCallback((content: string) => {
+    const messageId = streamingMessageIdRef.current;
+    if (!messageId) return;
+
+    setMessages((prev) =>
+      prev.map((msg) =>
+        msg.id === messageId
+          ? { ...msg, content: msg.content + content }
+          : msg
+      )
+    );
+  }, []);
+
+  // 处理流式输出完成
+  const handleComplete = useCallback((info: RateLimitInfo) => {
+    const messageId = streamingMessageIdRef.current;
+    if (messageId) {
+      setMessages((prev) =>
+        prev.map((msg) =>
+          msg.id === messageId
+            ? { ...msg, isStreaming: false }
+            : msg
+        )
+      );
+    }
+    streamingMessageIdRef.current = null;
+    setRateLimitInfo(info);
+    setIsLoading(false);
+  }, []);
+
+  // 处理错误
+  const handleError = useCallback((err: ChatError) => {
+    streamingMessageIdRef.current = null;
+    setIsLoading(false);
+
+    if (err.remaining === 0) {
+      // 速率限制错误
+      setError(err.message || "今日提问次数已用完，明天再来吧！");
+      setRateLimitInfo({
+        remaining: 0,
+        total: 10,
+        resetTime: err.resetTime || 0,
+      });
+    } else {
+      // 其他错误
+      const errorMessage: Message = {
+        id: (Date.now() + 1).toString(),
+        role: "assistant",
+        content: `抱歉，出了点问题：${err.message || err.error}。请稍后再试。`,
+      };
+      setMessages((prev) => prev.filter(m => !m.isStreaming).concat(errorMessage));
+    }
+  }, []);
+
   const handleSend = async () => {
     if (!input.trim() || isLoading) return;
+
+    // 清除之前的错误
+    setError(null);
 
     const userMessage: Message = {
       id: Date.now().toString(),
@@ -49,28 +123,35 @@ export default function ChatPanel({ isOpen, onClose }: ChatPanelProps) {
       content: input.trim(),
     };
 
-    setMessages((prev) => [...prev, userMessage]);
+    // 创建一个空的助手消息用于流式填充
+    const assistantMessageId = (Date.now() + 1).toString();
+    const assistantMessage: Message = {
+      id: assistantMessageId,
+      role: "assistant",
+      content: "",
+      isStreaming: true,
+    };
+
+    setMessages((prev) => [...prev, userMessage, assistantMessage]);
+    streamingMessageIdRef.current = assistantMessageId;
     setInput("");
     setIsLoading(true);
 
-    try {
-      const response = await sendMessage(input.trim());
-      const assistantMessage: Message = {
-        id: (Date.now() + 1).toString(),
-        role: "assistant",
-        content: response,
-      };
-      setMessages((prev) => [...prev, assistantMessage]);
-    } catch {
-      const errorMessage: Message = {
-        id: (Date.now() + 1).toString(),
-        role: "assistant",
-        content: "抱歉，出了点问题。请稍后再试。",
-      };
-      setMessages((prev) => [...prev, errorMessage]);
-    } finally {
-      setIsLoading(false);
-    }
+    // 构建对话历史（不包含欢迎消息和当前空的助手消息）
+    const chatHistory: ChatMessage[] = messages
+      .filter((m) => m.id !== "welcome")
+      .map((m) => ({ role: m.role, content: m.content }));
+    
+    // 添加当前用户消息
+    chatHistory.push({ role: "user", content: userMessage.content });
+
+    // 发送流式请求
+    await sendMessageStream(
+      chatHistory,
+      handleChunk,
+      handleComplete,
+      handleError
+    );
   };
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
@@ -87,6 +168,9 @@ export default function ChatPanel({ isOpen, onClose }: ChatPanelProps) {
     "专业技能有哪些？",
     "如何联系你？",
   ];
+
+  // 判断是否还有配额
+  const hasQuota = rateLimitInfo === null || rateLimitInfo.remaining > 0;
 
   return (
     <>
@@ -118,8 +202,10 @@ export default function ChatPanel({ isOpen, onClose }: ChatPanelProps) {
               <Bot className="w-5 h-5" />
             </div>
             <div>
-              <h3 className="font-headline font-bold text-lg">小秘书</h3>
-              <p className="text-xs text-ink/60">随时为你解答</p>
+              <h3 className="font-headline font-bold text-lg">lilililanhui</h3>
+              <p className="text-xs text-ink/60">
+                {rateLimitInfo ? `今日剩余 ${rateLimitInfo.remaining}/${rateLimitInfo.total} 次` : "随时为你解答"}
+              </p>
             </div>
           </div>
           <button
@@ -130,6 +216,14 @@ export default function ChatPanel({ isOpen, onClose }: ChatPanelProps) {
             <X className="w-5 h-5" />
           </button>
         </div>
+
+        {/* Error Banner */}
+        {error && (
+          <div className="px-4 py-3 bg-red-50 border-b border-red-200 flex items-center gap-2 text-red-700">
+            <AlertCircle className="w-4 h-4 flex-shrink-0" />
+            <span className="text-sm">{error}</span>
+          </div>
+        )}
 
         {/* Messages */}
         <div className="flex-1 overflow-y-auto p-4 space-y-4">
@@ -167,13 +261,16 @@ export default function ChatPanel({ isOpen, onClose }: ChatPanelProps) {
               >
                 <p className="text-sm whitespace-pre-wrap leading-relaxed">
                   {message.content}
+                  {message.isStreaming && (
+                    <span className="inline-block w-1.5 h-4 bg-ink/60 ml-0.5 animate-pulse" />
+                  )}
                 </p>
               </div>
             </div>
           ))}
 
-          {/* Loading indicator */}
-          {isLoading && (
+          {/* Loading indicator - 仅在没有流式消息时显示 */}
+          {isLoading && !streamingMessageIdRef.current && (
             <div className="flex gap-3">
               <div className="w-8 h-8 rounded-full bg-ink text-paper flex items-center justify-center flex-shrink-0">
                 <Bot className="w-4 h-4" />
@@ -203,7 +300,8 @@ export default function ChatPanel({ isOpen, onClose }: ChatPanelProps) {
                     setInput(suggestion);
                     inputRef.current?.focus();
                   }}
-                  className="text-xs px-3 py-1.5 bg-paper-dark border border-newspaper/50 rounded-full hover:bg-ink hover:text-paper transition-colors"
+                  disabled={!hasQuota}
+                  className="text-xs px-3 py-1.5 bg-paper-dark border border-newspaper/50 rounded-full hover:bg-ink hover:text-paper transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   {suggestion}
                 </button>
@@ -221,8 +319,8 @@ export default function ChatPanel({ isOpen, onClose }: ChatPanelProps) {
               value={input}
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={handleKeyDown}
-              placeholder="输入你的问题..."
-              disabled={isLoading}
+              placeholder={hasQuota ? "输入你的问题..." : "今日次数已用完"}
+              disabled={isLoading || !hasQuota}
               className="
                 flex-1 px-4 py-3 
                 bg-paper-dark border border-newspaper/50 
@@ -236,7 +334,7 @@ export default function ChatPanel({ isOpen, onClose }: ChatPanelProps) {
             />
             <button
               onClick={handleSend}
-              disabled={!input.trim() || isLoading}
+              disabled={!input.trim() || isLoading || !hasQuota}
               className="
                 w-11 h-11 rounded-full
                 bg-ink text-paper
