@@ -422,7 +422,7 @@ export default function ChatPanel({ isOpen, onClose }: ChatPanelProps) {
                 flex-1 px-4 py-3 
                 bg-paper-dark border border-newspaper/50 
                 rounded-full
-                text-sm
+                text-base
                 placeholder:text-ink/40
                 focus:outline-none focus:ring-2 focus:ring-ink/20 focus:border-ink
                 disabled:opacity-50
